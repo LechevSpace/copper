@@ -48,4 +48,12 @@
             missions: ["B"],
         ),
     ],
+    includes: [
+        (
+            path: "template_task.ron",
+            params: {
+                "index": 1,
+            },
+        ),
+    ]
 )

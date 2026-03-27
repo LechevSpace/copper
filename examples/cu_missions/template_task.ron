@@ -1,0 +1,25 @@
+(
+    tasks: [
+        (
+            id: "task{{index}}",
+            type: "tasks::ExampleTask",
+            config: {"label": "Mission B"},
+            missions: ["B"],
+        ),
+        
+    ],
+    cnx: [
+        (
+            src: "src",
+            dst: "task{{index}}",
+            msg: "i32",
+            missions: ["B"],
+        ),
+        (
+            src: "task{{index}}",
+            dst: "sink",
+            msg: "i32",
+            missions: ["B"],
+        ),
+    ],
+)
