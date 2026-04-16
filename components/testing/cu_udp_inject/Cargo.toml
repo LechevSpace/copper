@@ -9,6 +9,12 @@ keywords.workspace = true
 categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
+publish = false
+
+[package.metadata.copper]
+kind = "testing"
+domains = ["testing/injection", "testing/network"]
+environments = ["host"]
 
 [dependencies]
 pcap = "2.2.0"

@@ -1,6 +1,7 @@
 mod motor_model;
 mod sim_driver;
 pub mod tasks;
+mod windowing;
 mod world;
 
 #[copper_runtime(config = "copperconfig.ron", sim_mode = true)]
@@ -62,15 +63,13 @@ fn main() {
     .insert_resource(sim_driver::LastCopperTick::default())
     .init_resource::<LayoutSpawned>()
     .add_systems(Startup, setup_ui_camera)
+    .add_systems(Update, windowing::set_copper_window_icon)
     .add_systems(Update, spawn_balancebot_layout)
     .add_systems(Update, sync_split_loading_overlay);
 
     world::build_world(&mut app, false, true);
-    app.add_systems(
-        FixedUpdate,
-        sim_driver::run_copper_callback::<LoggerRuntime>,
-    );
-    app.add_systems(PostUpdate, sim_driver::stop_copper_on_exit::<LoggerRuntime>);
+    app.add_systems(FixedUpdate, sim_driver::run_copper_callback);
+    app.add_systems(PostUpdate, sim_driver::stop_copper_on_exit);
     app.run();
 }
 
@@ -119,6 +118,7 @@ fn render_plugin() -> RenderPlugin {
 fn primary_window() -> Window {
     Window {
         title: "Copper BalanceBot BevyMon".into(),
+        name: Some("io.github.copper-project.balancebot-bevymon".into()),
         resolution: (1680, 960).into(),
         ..default()
     }

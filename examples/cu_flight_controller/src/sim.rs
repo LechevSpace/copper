@@ -10,6 +10,8 @@ mod rc_joystick;
 mod sim_support;
 #[cfg(feature = "sim")]
 mod tasks;
+#[cfg(not(target_arch = "wasm32"))]
+mod windowing;
 
 use avian3d::prelude::*;
 use bevy::app::AppExit;
@@ -43,8 +45,6 @@ use cu_bevymon::{
     CuBevyMonSurface, CuBevyMonTexture, MonitorModel, MonitorUiOptions, spawn_split_layout,
 };
 use cu29::prelude::*;
-#[cfg(all(not(target_arch = "wasm32"), feature = "sim"))]
-use cu29_helpers::basic_copper_setup;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rc_joystick::{RcAxisBindings, RcFrame, RcJoystick};
@@ -61,6 +61,7 @@ use std::fs;
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 #[cfg(feature = "bevymon")]
 use std::sync::{Arc, Mutex};
 
@@ -89,8 +90,7 @@ impl Default for SimVehicleState {
 }
 
 #[derive(Resource)]
-struct CopperState<T: Send + Sync + 'static> {
-    _runtime_state: T,
+struct CopperState {
     clock: RobotClock,
     clock_mock: RobotClockMock,
     app: gnss::FlightControllerSim,
@@ -386,6 +386,7 @@ impl Multicopter {
 const THRUST_CONSTANT: f32 = 1.0e-6;
 const DRAG_CONSTANT: f32 = 1.0e-7;
 const MAX_OMEGA_RAD_S: f32 = 2200.0;
+const EARTH_METERS_PER_DEG_LAT: f64 = 111_320.0;
 // Bevy world frame uses X east, Y up, Z south in this scene.
 // Keep declination at 0 in the simulated magnetic field itself so
 // `declination_deg` in `MagneticTrueHeading` can be tested independently.
@@ -603,16 +604,10 @@ fn setup_copper(mut commands: Commands) {
     }
 
     let (clock, clock_mock) = RobotClock::mock();
-    let ctx = basic_copper_setup(
-        &PathBuf::from(logger_path),
-        LOG_SLAB_SIZE,
-        true,
-        Some(clock.clone()),
-    )
-    .expect("failed to setup logger");
-
-    let mut app = gnss::FlightControllerSimBuilder::new()
-        .with_context(&ctx)
+    let mut app = gnss::FlightControllerSim::builder()
+        .with_clock(clock.clone())
+        .with_log_path(PathBuf::from(logger_path), LOG_SLAB_SIZE)
+        .expect("failed to create logger")
         .with_sim_callback(&mut default_callback)
         .build()
         .expect("failed to create runtime");
@@ -621,7 +616,6 @@ fn setup_copper(mut commands: Commands) {
         .expect("failed to start tasks");
 
     commands.insert_resource(CopperState {
-        _runtime_state: ctx,
         clock,
         clock_mock,
         app,
@@ -629,23 +623,20 @@ fn setup_copper(mut commands: Commands) {
 }
 
 #[cfg(feature = "bevymon")]
-fn build_bevymon_copper() -> (MonitorModel, CopperState<LoggerRuntime>) {
+fn build_bevymon_copper() -> (MonitorModel, CopperState) {
     #[allow(clippy::identity_op)]
     const LOG_SLAB_SIZE: Option<usize> = Some(128 * 1024 * 1024);
-    const STRUCTURED_LOG_SECTION_SIZE: usize = 4096 * 10;
 
     let (clock, clock_mock) = RobotClock::mock();
     let unified_logger = build_unified_logger(LOG_SLAB_SIZE).expect("failed to create logger");
-    let logger_runtime =
-        init_logger_runtime(&clock, unified_logger.clone(), STRUCTURED_LOG_SECTION_SIZE)
-            .expect("failed to initialize structured logger");
 
     let mut sim_callback = default_callback;
-    let mut app = <gnss::FlightControllerSim as CuSimApplication<
-        BevyMonSectionStorage,
-        BevyMonUnifiedLogger,
-    >>::new(clock.clone(), unified_logger, None, &mut sim_callback)
-    .expect("failed to create runtime");
+    let mut app = gnss::FlightControllerSim::builder()
+        .with_clock(clock.clone())
+        .with_logger::<BevyMonSectionStorage, BevyMonUnifiedLogger>(unified_logger)
+        .with_sim_callback(&mut sim_callback)
+        .build()
+        .expect("failed to create runtime");
 
     app.start_all_tasks(&mut sim_callback)
         .expect("failed to start tasks");
@@ -654,30 +645,11 @@ fn build_bevymon_copper() -> (MonitorModel, CopperState<LoggerRuntime>) {
     (
         monitor_model,
         CopperState {
-            _runtime_state: logger_runtime,
             clock,
             clock_mock,
             app,
         },
     )
-}
-
-#[cfg(feature = "bevymon")]
-fn init_logger_runtime(
-    clock: &RobotClock,
-    unified_logger: Arc<Mutex<BevyMonUnifiedLogger>>,
-    structured_log_section_size: usize,
-) -> CuResult<LoggerRuntime> {
-    let structured_stream = stream_write::<CuLogEntry, BevyMonSectionStorage>(
-        unified_logger,
-        UnifiedLogType::StructuredLogLine,
-        structured_log_section_size,
-    )?;
-    Ok(LoggerRuntime::init(
-        clock.clone(),
-        structured_stream,
-        None::<NullLog>,
-    ))
 }
 
 #[cfg(feature = "bevymon")]
@@ -1441,8 +1413,8 @@ fn sync_vehicle_state(
     };
 }
 
-fn run_copper<T: Send + Sync + 'static>(
-    mut copper: ResMut<CopperState<T>>,
+fn run_copper(
+    mut copper: ResMut<CopperState>,
     physics_time: Res<Time<Physics>>,
     sim_state: Res<SimState>,
     rc_input: Res<SimRcInput>,
@@ -1455,9 +1427,9 @@ fn run_copper<T: Send + Sync + 'static>(
         .set_value(physics_time.elapsed().as_nanos() as u64);
     let vehicle = sim_state.vehicle.clone();
     let rc = rc_input.clone();
-    sim_support::sim_battery_set_armed(rc.armed);
-    sim_support::sim_battery_set_throttle(rc.throttle);
-    sim_support::sim_gnss_set_vehicle_state(
+    sim_battery_set_armed(rc.armed);
+    sim_battery_set_throttle(rc.throttle);
+    sim_gnss_set_vehicle_state(
         [vehicle.position.x, vehicle.position.y, vehicle.position.z],
         [
             vehicle.velocity_world.x,
@@ -1633,8 +1605,83 @@ fn update_quadcopter_visibility(
     };
 }
 
+fn sim_activity_led_is_on() -> bool {
+    sim_support::sim_activity_led_state().load(Ordering::Relaxed)
+}
+
+fn sim_battery_set_throttle(throttle: f32) {
+    let clamped = throttle.clamp(0.0, 1.0);
+    sim_support::sim_battery_throttle_state().store(clamped.to_bits(), Ordering::Relaxed);
+}
+
+fn sim_battery_set_armed(armed: bool) {
+    sim_support::sim_battery_armed_state().store(armed, Ordering::Relaxed);
+}
+
+fn sim_gnss_set_vehicle_state(position_xyz_m: [f32; 3], velocity_xyz_mps: [f32; 3]) {
+    // Scene/world alignment in this sim: +Z tracks geographic north and +X tracks geographic west.
+    // GNSS expects NED signs, so east is the opposite of world +X.
+    let north_m = position_xyz_m[2] as f64;
+    let east_m = -(position_xyz_m[0] as f64);
+    let up_m = position_xyz_m[1];
+
+    let meters_per_deg_lon = (EARTH_METERS_PER_DEG_LAT
+        * sim_support::GNSS_FIXED_LAT_DEG.to_radians().cos().abs())
+    .max(1.0);
+    let lat_deg = sim_support::GNSS_FIXED_LAT_DEG + (north_m / EARTH_METERS_PER_DEG_LAT);
+    let lon_deg = sim_support::GNSS_FIXED_LON_DEG + (east_m / meters_per_deg_lon);
+
+    let velocity_north_mps = velocity_xyz_mps[2];
+    let velocity_east_mps = -velocity_xyz_mps[0];
+    let velocity_down_mps = -velocity_xyz_mps[1];
+    let ground_speed_mps = libm::sqrtf(
+        velocity_north_mps * velocity_north_mps + velocity_east_mps * velocity_east_mps,
+    )
+    .max(0.0);
+    let heading_motion_deg = if ground_speed_mps > 1.0e-3 {
+        wrap_heading_deg(libm::atan2f(velocity_east_mps, velocity_north_mps).to_degrees())
+    } else {
+        0.0
+    };
+
+    let state = sim_support::sim_gnss_state();
+    state
+        .lat_deg_bits
+        .store(lat_deg.to_bits(), Ordering::Relaxed);
+    state
+        .lon_deg_bits
+        .store(lon_deg.to_bits(), Ordering::Relaxed);
+    state.ellipsoid_alt_m_bits.store(
+        (sim_support::GNSS_FIXED_ELLIPSOID_ALT_M + up_m).to_bits(),
+        Ordering::Relaxed,
+    );
+    state.msl_alt_m_bits.store(
+        (sim_support::GNSS_FIXED_MSL_ALT_M + up_m).to_bits(),
+        Ordering::Relaxed,
+    );
+    state
+        .velocity_north_mps_bits
+        .store(velocity_north_mps.to_bits(), Ordering::Relaxed);
+    state
+        .velocity_east_mps_bits
+        .store(velocity_east_mps.to_bits(), Ordering::Relaxed);
+    state
+        .velocity_down_mps_bits
+        .store(velocity_down_mps.to_bits(), Ordering::Relaxed);
+    state
+        .ground_speed_mps_bits
+        .store(ground_speed_mps.to_bits(), Ordering::Relaxed);
+    state
+        .heading_motion_deg_bits
+        .store(heading_motion_deg.to_bits(), Ordering::Relaxed);
+}
+
+fn wrap_heading_deg(value: f32) -> f32 {
+    value.rem_euclid(360.0)
+}
+
 fn track_sim_led_state() {
-    let _on = sim_support::sim_activity_led_is_on();
+    let _on = sim_activity_led_is_on();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1889,10 +1936,7 @@ fn update_osd_overlay(
     rasterize_osd_canvas(&osd_overlay, &raster_source, canvas_image);
 }
 
-fn stop_copper_on_exit<T: Send + Sync + 'static>(
-    mut exit_events: MessageReader<AppExit>,
-    mut copper: ResMut<CopperState<T>>,
-) {
+fn stop_copper_on_exit(mut exit_events: MessageReader<AppExit>, mut copper: ResMut<CopperState>) {
     for _ in exit_events.read() {
         let _ = copper.app.stop_all_tasks(&mut default_callback);
         let _ = copper.app.log_shutdown_completed();
@@ -1944,6 +1988,13 @@ fn asset_plugin() -> AssetPlugin {
 }
 
 fn primary_window(split_monitor: bool) -> Window {
+    #[cfg(not(target_arch = "wasm32"))]
+    let app_id = if split_monitor {
+        "io.github.copper-project.flight-controller-bevymon"
+    } else {
+        "io.github.copper-project.flight-controller-sim"
+    };
+
     let title = if split_monitor {
         "Copper Flight Controller BevyMon"
     } else {
@@ -1965,6 +2016,7 @@ fn primary_window(split_monitor: bool) -> Window {
     {
         Window {
             title: title.into(),
+            name: Some(app_id.into()),
             resolution: (1680, 960).into(),
             ..default()
         }
@@ -2078,47 +2130,49 @@ pub fn build_world(headless: bool, split_monitor: bool) -> App {
                 ..default()
             })
             .set(asset_plugin()),
-    )
-    .add_plugins(PhysicsPlugins::default())
-    .insert_resource(Gravity(Vec3::new(0.0, -9.81, 0.0)))
-    .insert_resource(Time::<Physics>::default())
-    .add_systems(
-        Startup,
-        (setup_world, setup_full_window_hud_root, setup_joystick),
-    )
-    .add_systems(
-        Update,
-        (
-            spawn_loading_overlay,
-            spawn_help_overlay,
-            spawn_osd_overlay,
-            sync_loading_overlay,
-        ),
-    )
-    .add_systems(
-        Update,
-        (
-            spawn_quadcopter_when_world_ready,
-            poll_joystick,
-            update_rc_input_keyboard,
-            adjust_keyboard_throttle,
-            reset_vehicle,
-        ),
-    )
-    .add_systems(
-        Update,
-        (
-            toggle_camera_view,
-            update_quadcopter_visibility,
-            camera_follow_quadcopter,
-            track_sim_led_state,
-            update_help_overlay,
-            prepare_osd_raster_source,
-            update_osd_overlay,
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, windowing::set_copper_window_icon);
+    app.add_plugins(PhysicsPlugins::default())
+        .insert_resource(Gravity(Vec3::new(0.0, -9.81, 0.0)))
+        .insert_resource(Time::<Physics>::default())
+        .add_systems(
+            Startup,
+            (setup_world, setup_full_window_hud_root, setup_joystick),
         )
-            .chain(),
-    )
-    .add_systems(FixedUpdate, sync_vehicle_state);
+        .add_systems(
+            Update,
+            (
+                spawn_loading_overlay,
+                spawn_help_overlay,
+                spawn_osd_overlay,
+                sync_loading_overlay,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                spawn_quadcopter_when_world_ready,
+                poll_joystick,
+                update_rc_input_keyboard,
+                adjust_keyboard_throttle,
+                reset_vehicle,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                toggle_camera_view,
+                update_quadcopter_visibility,
+                camera_follow_quadcopter,
+                track_sim_led_state,
+                update_help_overlay,
+                prepare_osd_raster_source,
+                update_osd_overlay,
+            )
+                .chain(),
+        )
+        .add_systems(FixedUpdate, sync_vehicle_state);
 
     register_scene_reflect_types(&mut app);
 
@@ -2133,11 +2187,11 @@ pub fn run_sim() {
         app.add_systems(Startup, setup_copper);
         app.add_systems(
             FixedUpdate,
-            (run_copper::<CopperContext>, apply_multicopter_dynamics)
+            (run_copper, apply_multicopter_dynamics)
                 .chain()
                 .after(sync_vehicle_state),
         );
-        app.add_systems(PostUpdate, stop_copper_on_exit::<CopperContext>);
+        app.add_systems(PostUpdate, stop_copper_on_exit);
     }
     app.run();
 }
@@ -2160,11 +2214,11 @@ pub fn run_bevymon() {
         .add_systems(Update, spawn_bevymon_layout)
         .add_systems(
             FixedUpdate,
-            (run_copper::<LoggerRuntime>, apply_multicopter_dynamics)
+            (run_copper, apply_multicopter_dynamics)
                 .chain()
                 .after(sync_vehicle_state),
         )
-        .add_systems(PostUpdate, stop_copper_on_exit::<LoggerRuntime>);
+        .add_systems(PostUpdate, stop_copper_on_exit);
     app.run();
 }
 
@@ -2176,6 +2230,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     fn heading_from_mag_xy_deg(mag: [f32; 3]) -> f32 {
         let mut heading = libm::atan2f(mag[1], mag[0]).to_degrees();
@@ -2183,6 +2238,11 @@ mod tests {
             heading += 360.0;
         }
         heading
+    }
+
+    fn sim_gnss_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn assert_heading_close(actual: f32, expected: f32) {
@@ -2234,6 +2294,54 @@ mod tests {
             gyro_fc[2] < 0.0,
             "right turn should map to negative FC gyro_z, got {}",
             gyro_fc[2]
+        );
+    }
+
+    #[test]
+    fn sim_gnss_east_is_negative_world_x() {
+        let _guard = sim_gnss_test_lock().lock().unwrap();
+        let state = sim_support::sim_gnss_state();
+
+        sim_gnss_set_vehicle_state([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+        let lon0 = f64::from_bits(state.lon_deg_bits.load(Ordering::Relaxed));
+
+        // In this scene, moving east is -X in world.
+        sim_gnss_set_vehicle_state([-20.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+        let lon_east = f64::from_bits(state.lon_deg_bits.load(Ordering::Relaxed));
+        assert!(lon_east > lon0, "east movement should increase longitude");
+
+        sim_gnss_set_vehicle_state([20.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+        let lon_west = f64::from_bits(state.lon_deg_bits.load(Ordering::Relaxed));
+        assert!(lon_west < lon0, "west movement should decrease longitude");
+    }
+
+    #[test]
+    fn sim_gnss_populates_ne_down_velocity_and_heading() {
+        let _guard = sim_gnss_test_lock().lock().unwrap();
+        let state = sim_support::sim_gnss_state();
+
+        // World velocity +X is west, +Z is north, +Y is up.
+        sim_gnss_set_vehicle_state([0.0, 0.0, 0.0], [-5.0, 2.0, 0.0]); // 5 m/s east, 2 m/s up
+
+        let vn = f32::from_bits(state.velocity_north_mps_bits.load(Ordering::Relaxed));
+        let ve = f32::from_bits(state.velocity_east_mps_bits.load(Ordering::Relaxed));
+        let vd = f32::from_bits(state.velocity_down_mps_bits.load(Ordering::Relaxed));
+        let gs = f32::from_bits(state.ground_speed_mps_bits.load(Ordering::Relaxed));
+        let hm = f32::from_bits(state.heading_motion_deg_bits.load(Ordering::Relaxed));
+
+        assert!(vn.abs() < 1.0e-6, "north velocity should be ~0");
+        assert!((ve - 5.0).abs() < 1.0e-6, "east velocity should be +5 m/s");
+        assert!(
+            (vd + 2.0).abs() < 1.0e-6,
+            "down velocity should be -2 m/s for upward motion"
+        );
+        assert!(
+            (gs - 5.0).abs() < 1.0e-6,
+            "ground speed should track horizontal speed"
+        );
+        assert!(
+            (hm - 90.0).abs() < 1.0e-6,
+            "eastward motion heading should be 90 deg"
         );
     }
 }

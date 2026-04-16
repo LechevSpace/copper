@@ -11,14 +11,19 @@ homepage.workspace = true
 repository.workspace = true
 build = "build.rs"
 
+[package.metadata.copper]
+kind = "monitor"
+domains = ["monitor/safety"]
+environments = ["host", "embedded"]
+
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-cu29 = { path = "../../../core/cu29", version = "0.14.0", default-features = false }
+cu29 = { path = "../../../core/cu29", version = "0.15.0", default-features = false }
 
 [dev-dependencies]
-cu-logmon = { path = "../cu_logmon", version = "0.14.0", default-features = false, features = [
+cu-logmon = { path = "../cu_logmon", version = "0.15.0", default-features = false, features = [
   "std",
 ] }
 

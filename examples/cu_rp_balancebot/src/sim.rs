@@ -1,6 +1,7 @@
 mod motor_model;
 mod sim_driver;
 pub mod tasks;
+mod windowing;
 mod world;
 
 #[copper_runtime(config = "copperconfig.ron", sim_mode = true)]
@@ -9,7 +10,7 @@ struct BalanceBotSim {}
 use bevy::asset::{AssetApp, UnapprovedPathMode};
 use bevy::prelude::{
     App, AssetPlugin, DefaultPlugins, FixedUpdate, Font, ImagePlugin, Mesh, MinimalPlugins,
-    PluginGroup, PostUpdate, SceneSpawner, StandardMaterial, Startup, Window, WindowPlugin,
+    PluginGroup, PostUpdate, SceneSpawner, StandardMaterial, Startup, Update, Window, WindowPlugin,
     default,
 };
 use bevy::render::RenderPlugin;
@@ -53,6 +54,7 @@ pub fn make_world(headless: bool) -> App {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Copper Simulator".into(),
+                        name: Some("io.github.copper-project.balancebot-sim".into()),
                         ..default()
                     }),
                     ..default()
@@ -61,16 +63,14 @@ pub fn make_world(headless: bool) -> App {
                     unapproved_path_mode: UnapprovedPathMode::Allow,
                     ..default()
                 }),
-        );
+        )
+        .add_systems(Update, windowing::set_copper_window_icon);
     };
 
     world::build_world(&mut app, headless, false);
     app.add_systems(Startup, sim_driver::setup_native_copper);
-    app.add_systems(
-        FixedUpdate,
-        sim_driver::run_copper_callback::<CopperContext>,
-    );
-    app.add_systems(PostUpdate, sim_driver::stop_copper_on_exit::<CopperContext>);
+    app.add_systems(FixedUpdate, sim_driver::run_copper_callback);
+    app.add_systems(PostUpdate, sim_driver::stop_copper_on_exit);
     app
 }
 
@@ -84,6 +84,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "local-only smoke test: downloads scene assets and is not suitable for CI"]
     fn test_balancebot_runs() {
         let mut world = make_world(true);
         world.update();

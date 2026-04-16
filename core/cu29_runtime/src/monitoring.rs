@@ -4,6 +4,7 @@
 use crate::config::CuConfig;
 use crate::config::{
     BridgeChannelConfigRepresentation, BridgeConfig, ComponentConfig, CuGraph, Flavor, NodeId,
+    TaskKind, resolve_task_kind_for_id,
 };
 use crate::context::CuContext;
 use crate::cutask::CuMsgMetadata;
@@ -34,9 +35,19 @@ extern crate alloc;
 #[cfg(feature = "std")]
 use core::cell::Cell;
 #[cfg(feature = "std")]
-use std::sync::Arc;
+use std::backtrace::Backtrace;
+#[cfg(feature = "std")]
+use std::fs::File;
+#[cfg(feature = "std")]
+use std::io::Write;
+#[cfg(feature = "std")]
+use std::panic::PanicHookInfo;
+#[cfg(feature = "std")]
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 #[cfg(feature = "std")]
 use std::thread_local;
+#[cfg(feature = "std")]
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "std")]
 use std::{collections::HashMap as Map, string::String, string::ToString, vec::Vec};
 
@@ -550,6 +561,8 @@ impl MonitorComponentMetadata {
 #[derive(Debug, Clone)]
 pub struct CuMonitoringMetadata {
     mission_id: CompactString,
+    subsystem_id: Option<CompactString>,
+    instance_id: u32,
     layout: CopperListLayout,
     copperlist_info: CopperListInfo,
     topology: MonitorTopology,
@@ -569,6 +582,8 @@ impl CuMonitoringMetadata {
         Self::validate_culist_mapping(components.len(), culist_component_mapping)?;
         Ok(Self {
             mission_id,
+            subsystem_id: None,
+            instance_id: 0,
             layout: CopperListLayout::new(components, culist_component_mapping),
             copperlist_info,
             topology,
@@ -609,6 +624,17 @@ impl CuMonitoringMetadata {
     /// Active mission identifier for this runtime instance.
     pub fn mission_id(&self) -> &str {
         self.mission_id.as_str()
+    }
+
+    /// Compile-time subsystem identifier for this runtime instance when running in a
+    /// multi-Copper deployment.
+    pub fn subsystem_id(&self) -> Option<&str> {
+        self.subsystem_id.as_deref()
+    }
+
+    /// Deployment/runtime instance identity for this runtime instance.
+    pub fn instance_id(&self) -> u32 {
+        self.instance_id
     }
 
     /// Canonical table of monitored runtime components.
@@ -683,6 +709,16 @@ impl CuMonitoringMetadata {
         self.monitor_config = monitor_config;
         self
     }
+
+    pub fn with_subsystem_id(mut self, subsystem_id: Option<&str>) -> Self {
+        self.subsystem_id = subsystem_id.map(CompactString::from);
+        self
+    }
+
+    pub fn with_instance_id(mut self, instance_id: u32) -> Self {
+        self.instance_id = instance_id;
+        self
+    }
 }
 
 /// Runtime-provided dynamic monitoring handles passed once to [`CuMonitor::new`].
@@ -694,10 +730,23 @@ pub struct CuMonitoringRuntime {
 }
 
 impl CuMonitoringRuntime {
+    #[cfg(feature = "std")]
+    pub fn new(execution_probe: MonitorExecutionProbe) -> Self {
+        ensure_runtime_panic_hook_installed();
+        Self { execution_probe }
+    }
+
+    #[cfg(not(feature = "std"))]
     pub const fn new(execution_probe: MonitorExecutionProbe) -> Self {
         Self { execution_probe }
     }
 
+    #[cfg(feature = "std")]
+    pub fn unavailable() -> Self {
+        Self::new(MonitorExecutionProbe::unavailable())
+    }
+
+    #[cfg(not(feature = "std"))]
     pub const fn unavailable() -> Self {
         Self::new(MonitorExecutionProbe::unavailable())
     }
@@ -705,6 +754,342 @@ impl CuMonitoringRuntime {
     pub fn execution_probe(&self) -> &MonitorExecutionProbe {
         &self.execution_probe
     }
+
+    #[cfg(feature = "std")]
+    pub fn register_panic_cleanup<F>(&self, callback: F) -> PanicHookRegistration
+    where
+        F: Fn(&PanicReport) + Send + Sync + 'static,
+    {
+        ensure_runtime_panic_hook_installed();
+        register_panic_cleanup(callback)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn register_panic_action<F>(&self, callback: F) -> PanicHookRegistration
+    where
+        F: Fn(&PanicReport) -> Option<i32> + Send + Sync + 'static,
+    {
+        ensure_runtime_panic_hook_installed();
+        register_panic_action(callback)
+    }
+}
+
+#[cfg(feature = "std")]
+type PanicCleanupCallback = Arc<dyn Fn(&PanicReport) + Send + Sync + 'static>;
+#[cfg(feature = "std")]
+type PanicActionCallback = Arc<dyn Fn(&PanicReport) -> Option<i32> + Send + Sync + 'static>;
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct PanicReport {
+    message: String,
+    location: Option<String>,
+    thread_name: Option<String>,
+    backtrace: String,
+    timestamp_unix_ms: u128,
+    crash_report_path: Option<String>,
+}
+
+#[cfg(feature = "std")]
+impl PanicReport {
+    fn capture(info: &PanicHookInfo<'_>) -> Self {
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()));
+        let thread_name = std::thread::current().name().map(|name| name.to_string());
+        let timestamp_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|dur| dur.as_millis())
+            .unwrap_or(0);
+
+        Self {
+            message: panic_hook_payload_to_string(info),
+            location,
+            thread_name,
+            backtrace: Backtrace::force_capture().to_string(),
+            timestamp_unix_ms,
+            crash_report_path: None,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn location(&self) -> Option<&str> {
+        self.location.as_deref()
+    }
+
+    pub fn thread_name(&self) -> Option<&str> {
+        self.thread_name.as_deref()
+    }
+
+    pub fn backtrace(&self) -> &str {
+        &self.backtrace
+    }
+
+    pub fn timestamp_unix_ms(&self) -> u128 {
+        self.timestamp_unix_ms
+    }
+
+    pub fn crash_report_path(&self) -> Option<&str> {
+        self.crash_report_path.as_deref()
+    }
+
+    pub fn summary(&self) -> String {
+        match self.location() {
+            Some(location) => format!("panic at {location}: {}", self.message()),
+            None => format!("panic: {}", self.message()),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanicHookRegistrationKind {
+    Cleanup,
+    Action,
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone)]
+struct RegisteredPanicCleanup {
+    id: usize,
+    callback: PanicCleanupCallback,
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone)]
+struct RegisteredPanicAction {
+    id: usize,
+    callback: PanicActionCallback,
+}
+
+#[cfg(feature = "std")]
+#[derive(Default)]
+struct PanicHookRegistry {
+    cleanup_callbacks: StdMutex<Vec<RegisteredPanicCleanup>>,
+    action_callbacks: StdMutex<Vec<RegisteredPanicAction>>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct PanicHookRegistration {
+    id: usize,
+    kind: PanicHookRegistrationKind,
+}
+
+#[cfg(feature = "std")]
+impl Drop for PanicHookRegistration {
+    fn drop(&mut self) {
+        unregister_panic_hook(self.kind, self.id);
+    }
+}
+
+#[cfg(feature = "std")]
+static PANIC_HOOK_REGISTRY: OnceLock<PanicHookRegistry> = OnceLock::new();
+#[cfg(feature = "std")]
+static PANIC_HOOK_INSTALL_ONCE: OnceLock<()> = OnceLock::new();
+#[cfg(feature = "std")]
+static PANIC_HOOK_REGISTRATION_ID: AtomicUsize = AtomicUsize::new(1);
+#[cfg(feature = "std")]
+static PANIC_HOOK_ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "std")]
+fn panic_hook_registry() -> &'static PanicHookRegistry {
+    PANIC_HOOK_REGISTRY.get_or_init(PanicHookRegistry::default)
+}
+
+#[cfg(feature = "std")]
+fn ensure_runtime_panic_hook_installed() {
+    let _ = PANIC_HOOK_INSTALL_ONCE.get_or_init(|| {
+        std::panic::set_hook(Box::new(move |info| {
+            let _guard = PanicHookActiveGuard::new();
+            let mut report = PanicReport::capture(info);
+            run_panic_cleanup_callbacks(&report);
+            report.crash_report_path = write_panic_report_to_file(&report);
+            emit_panic_report(&report);
+
+            if let Some(exit_code) = run_panic_action_callbacks(&report) {
+                std::process::exit(exit_code);
+            }
+        }));
+    });
+}
+
+#[cfg(feature = "std")]
+struct PanicHookActiveGuard;
+
+#[cfg(feature = "std")]
+impl PanicHookActiveGuard {
+    fn new() -> Self {
+        PANIC_HOOK_ACTIVE_COUNT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(feature = "std")]
+impl Drop for PanicHookActiveGuard {
+    fn drop(&mut self) {
+        PANIC_HOOK_ACTIVE_COUNT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "std")]
+pub fn runtime_panic_hook_active() -> bool {
+    PANIC_HOOK_ACTIVE_COUNT.load(Ordering::SeqCst) > 0
+}
+
+#[cfg(not(feature = "std"))]
+pub const fn runtime_panic_hook_active() -> bool {
+    false
+}
+
+#[cfg(feature = "std")]
+fn register_panic_cleanup<F>(callback: F) -> PanicHookRegistration
+where
+    F: Fn(&PanicReport) + Send + Sync + 'static,
+{
+    let id = PANIC_HOOK_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
+    let callback = Arc::new(callback) as PanicCleanupCallback;
+    let mut callbacks = panic_hook_registry()
+        .cleanup_callbacks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    callbacks.push(RegisteredPanicCleanup { id, callback });
+    PanicHookRegistration {
+        id,
+        kind: PanicHookRegistrationKind::Cleanup,
+    }
+}
+
+#[cfg(feature = "std")]
+fn register_panic_action<F>(callback: F) -> PanicHookRegistration
+where
+    F: Fn(&PanicReport) -> Option<i32> + Send + Sync + 'static,
+{
+    let id = PANIC_HOOK_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
+    let callback = Arc::new(callback) as PanicActionCallback;
+    let mut callbacks = panic_hook_registry()
+        .action_callbacks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    callbacks.push(RegisteredPanicAction { id, callback });
+    PanicHookRegistration {
+        id,
+        kind: PanicHookRegistrationKind::Action,
+    }
+}
+
+#[cfg(feature = "std")]
+fn unregister_panic_hook(kind: PanicHookRegistrationKind, id: usize) {
+    let registry = panic_hook_registry();
+    match kind {
+        PanicHookRegistrationKind::Cleanup => {
+            let mut callbacks = registry
+                .cleanup_callbacks
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            callbacks.retain(|entry| entry.id != id);
+        }
+        PanicHookRegistrationKind::Action => {
+            let mut callbacks = registry
+                .action_callbacks
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            callbacks.retain(|entry| entry.id != id);
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn run_panic_cleanup_callbacks(report: &PanicReport) {
+    let callbacks = panic_hook_registry()
+        .cleanup_callbacks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    for entry in callbacks {
+        (entry.callback)(report);
+    }
+}
+
+#[cfg(feature = "std")]
+fn run_panic_action_callbacks(report: &PanicReport) -> Option<i32> {
+    let callbacks = panic_hook_registry()
+        .action_callbacks
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let mut exit_code = None;
+    for entry in callbacks {
+        if exit_code.is_none() {
+            exit_code = (entry.callback)(report);
+        } else {
+            let _ = (entry.callback)(report);
+        }
+    }
+    exit_code
+}
+
+#[cfg(feature = "std")]
+fn panic_hook_payload_to_string(info: &PanicHookInfo<'_>) -> String {
+    if let Some(msg) = info.payload().downcast_ref::<&str>() {
+        (*msg).to_string()
+    } else if let Some(msg) = info.payload().downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "panic with non-string payload".to_string()
+    }
+}
+
+#[cfg(feature = "std")]
+fn render_panic_report(report: &PanicReport) -> String {
+    let mut rendered = String::from("Copper panic\n");
+    rendered.push_str(&format!("time_unix_ms: {}\n", report.timestamp_unix_ms()));
+    rendered.push_str(&format!(
+        "thread: {}\n",
+        report.thread_name().unwrap_or("<unnamed>")
+    ));
+    if let Some(location) = report.location() {
+        rendered.push_str(&format!("location: {location}\n"));
+    }
+    rendered.push_str(&format!("message: {}\n", report.message()));
+    if let Some(path) = report.crash_report_path() {
+        rendered.push_str(&format!("crash_report: {path}\n"));
+    }
+    rendered.push_str("\nBacktrace:\n");
+    rendered.push_str(report.backtrace());
+    if !report.backtrace().ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered
+}
+
+#[cfg(feature = "std")]
+fn emit_panic_report(report: &PanicReport) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(render_panic_report(report).as_bytes());
+    let _ = stderr.flush();
+}
+
+#[cfg(feature = "std")]
+fn write_panic_report_to_file(report: &PanicReport) -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let file_name = format!(
+        "copper-crash-{}-{}.txt",
+        report.timestamp_unix_ms(),
+        std::process::id()
+    );
+    let path = cwd.join(file_name);
+    let path_string = path.to_string_lossy().to_string();
+    let mut file = File::create(&path).ok()?;
+    let mut report_with_path = report.clone();
+    report_with_path.crash_report_path = Some(path_string.clone());
+    file.write_all(render_panic_report(&report_with_path).as_bytes())
+        .ok()?;
+    file.flush().ok()?;
+    Some(path_string)
 }
 
 /// Monitor decision to be taken when a component step errored out.
@@ -1142,33 +1527,18 @@ where
     result
 }
 
-#[derive(Default, Debug, Clone, Copy)]
-struct NodeIoUsage {
-    has_incoming: bool,
-    has_outgoing: bool,
-}
-
 fn collect_output_ports(graph: &CuGraph, node_id: NodeId) -> Vec<(String, String)> {
-    let mut edge_ids = graph.get_src_edges(node_id).unwrap_or_default();
-    edge_ids.sort();
+    let Ok(msg_types) = graph.get_node_output_msg_types_by_id(node_id) else {
+        return Vec::new();
+    };
 
     let mut outputs = Vec::new();
-    let mut seen = Vec::new();
-    let mut port_idx = 0usize;
-    for edge_id in edge_ids {
-        let Some(edge) = graph.edge(edge_id) else {
-            continue;
-        };
-        if seen.iter().any(|msg| msg == &edge.msg) {
-            continue;
-        }
-        seen.push(edge.msg.clone());
+    for (port_idx, msg) in msg_types.into_iter().enumerate() {
         let mut port_label = String::from("out");
         port_label.push_str(&port_idx.to_string());
         port_label.push_str(": ");
-        port_label.push_str(edge.msg.as_str());
-        outputs.push((edge.msg.clone(), port_label));
-        port_idx += 1;
+        port_label.push_str(msg.as_str());
+        outputs.push((msg, port_label));
     }
     outputs
 }
@@ -1177,7 +1547,6 @@ fn collect_output_ports(graph: &CuGraph, node_id: NodeId) -> Vec<(String, String
 pub fn build_monitor_topology(config: &CuConfig, mission: &str) -> CuResult<MonitorTopology> {
     let graph = config.get_graph(Some(mission))?;
     let mut nodes: Map<String, MonitorNode> = Map::new();
-    let mut io_usage: Map<String, NodeIoUsage> = Map::new();
     let mut output_port_lookup: Map<String, Map<String, String>> = Map::new();
 
     let mut bridge_lookup: Map<&str, &BridgeConfig> = Map::new();
@@ -1185,24 +1554,20 @@ pub fn build_monitor_topology(config: &CuConfig, mission: &str) -> CuResult<Moni
         bridge_lookup.insert(bridge.id.as_str(), bridge);
     }
 
-    for cnx in graph.edges() {
-        io_usage.entry(cnx.src.clone()).or_default().has_outgoing = true;
-        io_usage.entry(cnx.dst.clone()).or_default().has_incoming = true;
-    }
-
-    for (_, node) in graph.get_all_nodes() {
+    for (node_idx, node) in graph.get_all_nodes() {
         let node_id = node.get_id();
-        let usage = io_usage.get(node_id.as_str()).cloned().unwrap_or_default();
-        let kind = match node.get_flavor() {
+        let task_kind = match node.get_flavor() {
             Flavor::Bridge => ComponentType::Bridge,
-            _ if !usage.has_incoming && usage.has_outgoing => ComponentType::Source,
-            _ if usage.has_incoming && !usage.has_outgoing => ComponentType::Sink,
-            _ => ComponentType::Task,
+            Flavor::Task => match resolve_task_kind_for_id(graph, node_idx)? {
+                TaskKind::Source => ComponentType::Source,
+                TaskKind::Regular => ComponentType::Task,
+                TaskKind::Sink => ComponentType::Sink,
+            },
         };
 
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
-        if kind == ComponentType::Bridge {
+        if task_kind == ComponentType::Bridge {
             if let Some(bridge) = bridge_lookup.get(node_id.as_str()) {
                 for ch in &bridge.channels {
                     match ch {
@@ -1214,11 +1579,8 @@ pub fn build_monitor_topology(config: &CuConfig, mission: &str) -> CuResult<Moni
                 }
             }
         } else {
-            if usage.has_incoming || !usage.has_outgoing {
-                inputs.push("in".to_string());
-            }
-            if usage.has_outgoing {
-                if let Some(node_idx) = graph.get_node_id_by_name(node_id.as_str()) {
+            match task_kind {
+                ComponentType::Source => {
                     let ports = collect_output_ports(graph, node_idx);
                     let mut port_map: Map<String, String> = Map::new();
                     for (msg_type, label) in ports {
@@ -1227,8 +1589,20 @@ pub fn build_monitor_topology(config: &CuConfig, mission: &str) -> CuResult<Moni
                     }
                     output_port_lookup.insert(node_id.clone(), port_map);
                 }
-            } else if !usage.has_incoming {
-                outputs.push("out".to_string());
+                ComponentType::Task => {
+                    inputs.push("in".to_string());
+                    let ports = collect_output_ports(graph, node_idx);
+                    let mut port_map: Map<String, String> = Map::new();
+                    for (msg_type, label) in ports {
+                        port_map.insert(msg_type, label.clone());
+                        outputs.push(label);
+                    }
+                    output_port_lookup.insert(node_id.clone(), port_map);
+                }
+                ComponentType::Sink => {
+                    inputs.push("in".to_string());
+                }
+                ComponentType::Bridge => unreachable!("handled above"),
             }
         }
 
@@ -1237,7 +1611,7 @@ pub fn build_monitor_topology(config: &CuConfig, mission: &str) -> CuResult<Moni
             MonitorNode {
                 id: node_id,
                 type_name: Some(node.get_type().to_string()),
-                kind,
+                kind: task_kind,
                 inputs,
                 outputs,
             },
@@ -1358,7 +1732,7 @@ impl CuMonitor for NoMonitor {
                 .collect();
 
             if let Ok(msg) = format_message_only(format_str, params.as_slice(), &named) {
-                let ts = format_timestamp(entry.time);
+                let ts = format_timestamp(entry.time.into());
                 println!("{} [{:?}] {}", ts, entry.level, msg);
             }
         });

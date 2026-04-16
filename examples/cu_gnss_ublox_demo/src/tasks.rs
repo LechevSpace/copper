@@ -1,9 +1,8 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use cu_gnss_payloads::{
-    GnssAccuracy, GnssCommandAck, GnssEpochTime, GnssFixSolution, GnssFixType, GnssInfoSeverity,
-    GnssInfoText, GnssRawUbxFrame, GnssRfStatus, GnssSatelliteState, GnssSatsInView,
-    GnssSignalState,
+    GnssAccuracy, GnssEpochTime, GnssFixSolution, GnssFixType, GnssInfoSeverity, GnssInfoText,
+    GnssSatelliteState, GnssSatsInView,
 };
 use cu29::prelude::*;
 use cu29::units::si::angle::degree;
@@ -142,8 +141,8 @@ impl CuSinkTask for FixSink {
 
             if fix_state_changed || self.seen <= 3 || self.seen.is_multiple_of(20) {
                 let fix_type = format!("{:?}", fix.fix_type);
-                let lat = format!("{:.7}", fix.latitude.get::<degree>());
-                let lon = format!("{:.7}", fix.longitude.get::<degree>());
+                let lat = format!("{:.7}", fix.position.latitude_degrees());
+                let lon = format!("{:.7}", fix.position.longitude_degrees());
                 let h_msl = format!("{:.2}", fix.height_msl.get::<meter>());
                 let speed = format!("{:.2}", fix.ground_speed.get::<meter_per_second>());
                 info!(
@@ -329,42 +328,6 @@ impl CuSinkTask for InfoTextSink {
                 GnssInfoSeverity::Error => error!("[gnss/info] {}", msg.text.as_str()),
             }
         }
-        Ok(())
-    }
-}
-
-#[derive(Reflect)]
-pub struct DropUnusedASink;
-
-impl Freezable for DropUnusedASink {}
-
-impl CuSinkTask for DropUnusedASink {
-    type Resources<'r> = ();
-    type Input<'m> = input_msg!('m, GnssSignalState, GnssRfStatus);
-
-    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
-        Ok(Self)
-    }
-
-    fn process(&mut self, _ctx: &CuContext, _input: &Self::Input<'_>) -> CuResult<()> {
-        Ok(())
-    }
-}
-
-#[derive(Reflect)]
-pub struct DropUnusedBSink;
-
-impl Freezable for DropUnusedBSink {}
-
-impl CuSinkTask for DropUnusedBSink {
-    type Resources<'r> = ();
-    type Input<'m> = input_msg!('m, GnssCommandAck, GnssRawUbxFrame);
-
-    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
-        Ok(Self)
-    }
-
-    fn process(&mut self, _ctx: &CuContext, _input: &Self::Input<'_>) -> CuResult<()> {
         Ok(())
     }
 }

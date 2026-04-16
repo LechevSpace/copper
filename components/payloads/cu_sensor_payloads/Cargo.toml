@@ -11,11 +11,16 @@ homepage.workspace = true
 repository.workspace = true
 description = "Those are standardized payloads for the Copper sensors. Feel free to contribute your own."
 
+[package.metadata.copper]
+kind = "payload"
+domains = ["payload/sensor"]
+environments = ["host", "embedded"]
+
 [dependencies]
 bincode = { workspace = true }
 cu29-soa-derive = { workspace = true }
-cu29-clock = { path = "../../../core/cu29_clock", version = "0.14.0", default-features = false }
-cu29 = { path = "../../../core/cu29", version = "0.14.0", default-features = false, features = [
+cu29-clock = { path = "../../../core/cu29_clock", version = "0.15.0", default-features = false }
+cu29 = { path = "../../../core/cu29", version = "0.15.0", default-features = false, features = [
   "units",
 ] }
 rerun = { workspace = true, optional = true }

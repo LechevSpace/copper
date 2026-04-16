@@ -10,6 +10,11 @@ categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.copper]
+kind = "source"
+domains = ["sensor/lidar"]
+environments = ["host"]
+
 [dependencies]
 cu29 = { workspace = true }
 cu-sensor-payloads = { workspace = true }
@@ -17,4 +22,4 @@ velodyne-lidar = { version = "0.3.0", features = ["pcap", "parallel"] }
 # remove `nmea` for `velodyne-lidar` since it has conflicts for `dep:serde_with` with `dep:zenoh-config`
 
 [dev-dependencies]
-cu-udp-inject = { path = "../../testing/cu_udp_inject", version = "0.14.0" }
+cu-udp-inject = { path = "../../testing/cu_udp_inject", version = "0.15.0" }

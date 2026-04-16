@@ -24,22 +24,23 @@ path = "src/logreader.rs"
 [[bin]]
 name = "cu-caterpillar-resim"
 path = "src/resim.rs"
+required-features = ["sim-debug"]
 
 
 [dependencies]
 cu29 = { workspace = true }
-cu29-helpers = { workspace = true }
 cu29-export = { workspace = true, features = ["python", "mcap"] }
 serde = { workspace = true }
 cu29-unifiedlog = { workspace = true }
 
-cu-consolemon = { path = "../../components/monitors/cu_consolemon", version = "0.14.0" } # needed
-cu-rp-gpio = { path = "../../components/sinks/cu_rp_gpio", version = "0.14.0" }
+cu-consolemon = { path = "../../components/monitors/cu_consolemon", version = "0.15.0" } # needed
+cu-rp-gpio = { path = "../../components/sinks/cu_rp_gpio", version = "0.15.0" }
 
 
 [features]
 default = ["mock"]
 mock = ["cu-rp-gpio/mock"]
+sim-debug = ["mock", "cu29/reflect", "cu29/remote-debug"]
 rtsan = ["cu29/rtsan"]
 determinism_ci = []
 

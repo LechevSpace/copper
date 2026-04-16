@@ -25,7 +25,8 @@
 //! - `reflect`: reflection support for runtime and units types
 //! - `textlogs`: text logging derive support
 //! - `remote-debug`: remote debug transport support
-//! - `sysclock-perf`: use a host/system clock for runtime perf timing while keeping robot time for `tov`
+//! - `sysclock-perf`: use a host/system clock for runtime perf timing while keeping robot time for `tov` and `rate_target_hz`
+//! - `high-precision-limiter`: std-only hybrid sleep/spin loop limiter for tighter `rate_target_hz` cadence
 //! - `async-cl-io`: offload CopperList serialization/logging to a dedicated std thread
 //! - `parallel-rt`: prepare the runtime for a future multi-threaded deterministic executor
 //!
@@ -60,6 +61,7 @@ compile_error!("feature `parallel-rt` requires `std`");
 extern crate alloc;
 
 pub use cu29_derive::{bundle_resources, resources};
+pub use cu29_runtime::app;
 pub use cu29_runtime::config;
 pub use cu29_runtime::context;
 pub use cu29_runtime::copperlist;
@@ -70,7 +72,10 @@ pub use cu29_runtime::curuntime;
 pub use cu29_runtime::cutask;
 #[cfg(feature = "std")]
 pub use cu29_runtime::debug;
+#[cfg(feature = "std")]
+pub use cu29_runtime::distributed_replay;
 pub use cu29_runtime::input_msg;
+pub use cu29_runtime::logcodec;
 pub use cu29_runtime::monitoring;
 pub use cu29_runtime::output_msg;
 #[cfg(all(feature = "std", feature = "parallel-rt"))]
@@ -82,6 +87,8 @@ pub use cu29_runtime::reflect;
 pub use cu29_runtime::reflect as bevy_reflect;
 #[cfg(feature = "remote-debug")]
 pub use cu29_runtime::remote_debug;
+#[cfg(feature = "std")]
+pub use cu29_runtime::replay;
 pub use cu29_runtime::resource;
 pub use cu29_runtime::rx_channels;
 #[cfg(feature = "std")]
@@ -217,6 +224,7 @@ pub mod prelude {
     #[cfg(feature = "std")]
     pub use cu29_runtime::debug::*;
     pub use cu29_runtime::input_msg;
+    pub use cu29_runtime::logcodec::*;
     pub use cu29_runtime::monitoring::*;
     pub use cu29_runtime::output_msg;
     pub use cu29_runtime::payload::*;
