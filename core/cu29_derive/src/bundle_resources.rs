@@ -24,7 +24,9 @@ pub fn bundle_resources(input: TokenStream) -> TokenStream {
         .unwrap_or_else(|| Ident::new("Bundle", proc_macro2::Span::call_site()));
     let enum_ident = format_ident!("{}Id", bundle_ident);
     let count = ids.len();
-    let variants = ids.iter();
+    let variants = ids.iter().map(|ident| {
+        Ident::new(&ident.to_string().to_case(Case::Pascal), ident.span())
+    });
     let names = ids.iter().map(|ident| {
         let name = ident.to_string().to_case(Case::Snake);
         syn::LitStr::new(&name, ident.span())

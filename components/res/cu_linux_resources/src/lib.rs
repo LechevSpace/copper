@@ -319,9 +319,9 @@ bundle_resources!(
         Serial3,
         Serial4,
         Serial5,
-        I2c0,
-        I2c1,
-        I2c2,
+        I2C0,
+        I2C1,
+        I2C2,
         Gpio0,
         Gpio1,
         Gpio2,
@@ -426,15 +426,15 @@ struct I2cSlot {
 #[cfg(target_os = "linux")]
 const I2C_SLOTS: &[I2cSlot] = &[
     I2cSlot {
-        id: LinuxResourcesId::I2c0,
+        id: LinuxResourcesId::I2C0,
         dev_key: I2C0_DEV_KEY,
     },
     I2cSlot {
-        id: LinuxResourcesId::I2c1,
+        id: LinuxResourcesId::I2C1,
         dev_key: I2C1_DEV_KEY,
     },
     I2cSlot {
-        id: LinuxResourcesId::I2c2,
+        id: LinuxResourcesId::I2C2,
         dev_key: I2C2_DEV_KEY,
     },
 ];
